@@ -1,6 +1,6 @@
 {
   "name": "good-korean-claude",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Korean writing style 체계적 추론자 v4 and three separate hooks: a translationese judge for every Korean line an edit adds, an em-dash ban for Korean Markdown files, and a check that the final reply has no em-dash and is not mostly English.",
   "author": {
     "name": "115dkk",
