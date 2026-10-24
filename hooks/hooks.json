@@ -1,0 +1,29 @@
+{
+  "description": "Checks every Korean line an edit adds against the Korean rules of chegyejeog-chulonja-v4-style before it is written.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/korean_judge.py",
+              "--rules",
+              "${CLAUDE_PLUGIN_ROOT}/skills/chegyejeog-chulonja-v4-style/SKILL.md",
+              "--section",
+              "# 2. 한국어",
+              "--scope",
+              "korean",
+              "--label",
+              "번역투 판정"
+            ],
+            "timeout": 180,
+            "statusMessage": "translationese check (Claude Sonnet 5.5)"
+          }
+        ]
+      }
+    ]
+  }
+}
