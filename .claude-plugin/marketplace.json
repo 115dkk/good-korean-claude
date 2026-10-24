@@ -4,12 +4,12 @@
     "name": "115dkk",
     "url": "https://github.com/115dkk"
   },
-  "description": "good-korean-claude: a Korean writing style for Claude and a hook that checks Korean text for translationese before it is written to a file.",
+  "description": "good-korean-claude: a Korean writing style for Claude and hooks that keep translationese, em-dashes and English-only replies out of Claude's Korean.",
   "plugins": [
     {
       "name": "good-korean-claude",
       "source": "./",
-      "description": "Korean writing style 체계적 추론자 v4 and a PreToolUse hook that checks every Korean line an edit adds against the style's Korean rules.",
+      "description": "Korean writing style 체계적 추론자 v4 and three separate hooks: a translationese judge for every Korean line an edit adds, an em-dash ban for Korean Markdown files, and a check that the final reply has no em-dash and is not mostly English.",
       "category": "writing",
       "keywords": ["korean", "writing", "style", "translationese", "hooks"]
     }

@@ -1,5 +1,5 @@
 {
-  "description": "Checks every Korean line an edit adds against the Korean rules of chegyejeog-chulonja-v4-style before it is written.",
+  "description": "Three separate checks on Korean text: a translationese judge for every Korean line an edit adds, an em-dash ban for Korean Markdown files, and a check that the final reply has no em-dash and is not mostly English.",
   "hooks": {
     "PreToolUse": [
       {
@@ -21,6 +21,35 @@
             ],
             "timeout": 180,
             "statusMessage": "translationese check (Claude Sonnet 5.5)"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/block_emdash.py"
+            ],
+            "timeout": 15,
+            "statusMessage": "em-dash check"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/report_guard.py"
+            ],
+            "timeout": 15,
+            "statusMessage": "reply check (em-dash, English ratio)"
           }
         ]
       }
