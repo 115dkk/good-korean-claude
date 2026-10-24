@@ -4,7 +4,7 @@ Claude가 쓰는 한국어에서 번역투를 덜어 내는 Claude Code 플러�
 
 ## 설치
 
-Claude Code에서 다음 두 명령을 차례로 실행합니다.
+Claude Code에서 다음 두 명령을 차례로 실행하십시오.
 
 ```
 /plugin marketplace add 115dkk/good-korean-claude
