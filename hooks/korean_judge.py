@@ -4,9 +4,9 @@ Write/Edit/MultiEdit이 새로 들이는 줄 가운데 한글이 든 줄과 그 
 골라 판정 모델(기본 Claude Sonnet 5.5, effort medium)에게 보낸다. 앞뒤 줄을 함께 보내야
 판정 모델이 한글 문구 옆의 코드까지 본다. 한국어 이름표 바로 아래 줄에서 예외 문자열을
 그대로 띄우는 코드가 그런 예다. 한글이 든 새 줄이 없으면 모델을 부르지 않는다.
-규칙에 분명히 걸리는 표현이 있으면
-deny와 함께 걸린 표현, 규칙, 고칠 말을 돌려주고, 그 밖에는 아무것도 출력하지 않아
-도구 호출이 그대로 진행된다. 판정 모델 호출이 실패하면 막지 않고 통과시키되 그
+규칙에 분명히 걸리는 표현이 있으면 deny를 돌려주며, 걸린 표현을 각각 하나씩 어긴 규칙,
+고칠 말과 함께 적는다. 같은 규칙을 여러 군데에서 어겼으면 그 수만큼 적는다. 그 밖에는
+아무것도 출력하지 않아 도구 호출이 그대로 진행된다. 판정 모델 호출이 실패하면 막지 않고 통과시키되 그
 사실을 systemMessage로 알린다.
 
 인자
@@ -14,7 +14,10 @@ deny와 함께 걸린 표현, 규칙, 고칠 말을 돌려주고, 그 밖에는 
   --section HEADING  그 파일에서 이 제목으로 시작하는 절만 쓴다(같거나 높은 단계의
                      다음 제목 앞까지). 없으면 파일 전체를 쓴다.
   --scope copy|korean
-                     copy: 화면에 보이는 문구와 README만 판정한다(write.md 대상).
+                     copy: 화면에 보이는 문구, README, 사용자에게 공개하는 문서
+                     페이지(처리방침, 약관, 도움말)를 판정한다(write.md 대상).
+                     마크다운이 공개 페이지인지는 판정 모델이 가리고, 에이전트
+                     지침 파일은 모델을 부르지 않고 통과시킨다.
                      korean: 파일 속 한국어 문장 전부를 판정한다.
   --label TEXT       거부 사유 첫 줄에 붙일 이름.
   --model ID, --effort LEVEL
@@ -44,6 +47,7 @@ MD_SUFFIXES = (".md", ".markdown", ".mdx")
 TEST_DIRS = {"test", "tests", "__tests__", "__snapshots__", "testdata", "fixtures"}
 TEST_NAME = re.compile(r"(^tests?\.rs$|_tests?\.[a-z]+$|\.(test|spec)\.[a-z]+$|^test_.*\.py$)", re.I)
 LOCKFILES = {"package-lock.json", "cargo.lock", "yarn.lock", "pnpm-lock.yaml", "poetry.lock"}
+AGENT_FILES = {"claude.md", "agents.md", "gemini.md", "skill.md"}
 
 SCHEMA = {
     "type": "object",
@@ -70,9 +74,11 @@ SCOPES = {
         "In scope means text the rules below govern: words a user interface shows to its users "
         "(labels, buttons, descriptions, helper text, tooltips, empty states, dialogs, notifications, "
         "toasts, status lines, error messages, installer, landing and login pages, localization "
-        "catalog entries) and the prose of a README. Out of scope: code comments, developer log "
-        "lines, identifiers, test names and fixtures, commit messages, internal design documents, "
-        "and anything you cannot tell is shown to users."
+        "catalog entries), the prose of a README, and pages published for users from Markdown or "
+        "HTML, such as a privacy policy, terms of use, or a help or documentation site. Out of "
+        "scope: code comments, developer log lines, identifiers, test names and fixtures, commit "
+        "messages, internal design documents and plans, and anything you cannot tell is shown to "
+        "users."
     ),
     "korean": (
         "In scope means every Korean sentence or phrase written in the file: documents, READMEs, "
@@ -92,7 +98,9 @@ verdict "allow" with no findings.
 
 Step 2. For in-scope lines only, look for expressions that clearly break a specific rule in the
 rule text below. Answer "deny" only for clear breaches you can name. When you are unsure,
-answer "allow". Style preferences that no rule states are not breaches.
+answer "allow". Style preferences that no rule states are not breaches. Report each clear breach
+separately: when the same rule is broken in several places, give one finding for each of them,
+and read every given line to the end.
 
 Each finding must quote the offending expression exactly as it appears in the given lines (an
 exact substring, not a paraphrase), name the rule it breaks, and give a corrected wording. Write
@@ -137,7 +145,8 @@ def skipped_path(path, scope):
     if ".git" in parts or name in LOCKFILES:
         return True
     if scope == "copy":
-        if name.endswith(MD_SUFFIXES) and not name.startswith("readme"):
+        # 에이전트에게 주는 지침 파일은 사용자가 읽는 글이 아니다. 나머지 마크다운은 모델이 가린다.
+        if name.endswith(MD_SUFFIXES) and (name in AGENT_FILES or parts & {".claude", "skills"}):
             return True
         if parts & TEST_DIRS or parts & {".github", ".superloopy"} or TEST_NAME.search(name):
             return True
