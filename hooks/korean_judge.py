@@ -1,7 +1,10 @@
 """PreToolUse 훅: 파일에 들어갈 한국어 문장을 별도 모델이 규칙과 대조해 판정한다.
 
-Write/Edit/MultiEdit이 새로 들이는 줄 가운데 한글이 든 줄만 골라 판정 모델(기본
-Claude Sonnet 5.5, effort medium)에게 보낸다. 규칙에 분명히 걸리는 표현이 있으면
+Write/Edit/MultiEdit이 새로 들이는 줄 가운데 한글이 든 줄과 그 앞뒤 세 줄 안의 새 줄을
+골라 판정 모델(기본 Claude Sonnet 5.5, effort medium)에게 보낸다. 앞뒤 줄을 함께 보내야
+판정 모델이 한글 문구 옆의 코드까지 본다. 한국어 이름표 바로 아래 줄에서 예외 문자열을
+그대로 띄우는 코드가 그런 예다. 한글이 든 새 줄이 없으면 모델을 부르지 않는다.
+규칙에 분명히 걸리는 표현이 있으면
 deny와 함께 걸린 표현, 규칙, 고칠 말을 돌려주고, 그 밖에는 아무것도 출력하지 않아
 도구 호출이 그대로 진행된다. 판정 모델 호출이 실패하면 막지 않고 통과시키되 그
 사실을 systemMessage로 알린다.
@@ -32,6 +35,7 @@ import tempfile
 
 JUDGE_TIMEOUT = 150
 MAX_CHARS = 20000
+CONTEXT = 3
 GUARD_ENV = "KOREAN_JUDGE_ACTIVE"
 
 HANGUL = re.compile(r"[가-힣ㄱ-ㆎ]")
@@ -79,7 +83,9 @@ SCOPES = {
 }
 
 INSTRUCTIONS = """You are a gate that judges Korean text before an AI coding agent writes it to a file.
-You receive the file path and only the lines the edit adds that contain Hangul.
+You receive the file path, the lines the edit adds that contain Hangul, and the other lines it
+adds within {context} lines of them. The nearby lines show the code around the copy, such as a
+raw error rendered right below a Korean label; judge them like any other line.
 
 Step 1. Decide which of those lines are in scope. {scope} If no line is in scope, answer
 verdict "allow" with no findings.
@@ -139,7 +145,10 @@ def skipped_path(path, scope):
 
 
 def added_lines(tool, tool_input, path):
-    """새로 들어오는 줄 가운데 이전에 없던 것만 돌려준다."""
+    """이전에 없던 새 줄 가운데 한글이 든 줄과 그 앞뒤 CONTEXT줄 안의 줄을 돌려준다.
+
+    빈 줄은 뺀다. 한글이 든 새 줄이 없으면 빈 목록을 돌려준다.
+    """
     pairs = []
     if tool == "Write":
         old = ""
@@ -158,8 +167,14 @@ def added_lines(tool, tool_input, path):
     lines = []
     for old, new in pairs:
         before = set(old.splitlines())
-        lines.extend(line for line in new.splitlines() if line not in before)
-    return [line for line in lines if HANGUL.search(line)]
+        new_lines = new.splitlines()
+        fresh = [i for i, line in enumerate(new_lines) if line.strip() and line not in before]
+        near = set()
+        for i in fresh:
+            if HANGUL.search(new_lines[i]):
+                near.update(range(i - CONTEXT, i + CONTEXT + 1))
+        lines.extend(new_lines[i] for i in fresh if i in near)
+    return lines
 
 
 def load_rules(path, section):
@@ -190,7 +205,7 @@ def judge(args, path, lines, rules):
     truncated = len(body) > MAX_CHARS
     body = body[:MAX_CHARS]
     # 규칙 원문은 Windows 명령줄 한도(32767자)를 넘을 수 있으므로 표준 입력으로 넘긴다.
-    prompt = (rules + "\n\n=== Text to judge ===\nFile: " + path + "\nAdded lines with Hangul"
+    prompt = (rules + "\n\n=== Text to judge ===\nFile: " + path + "\nAdded lines with Hangul and the added lines near them"
               + (" (truncated)" if truncated else "") + ":\n" + body)
     command = [
         claude, "-p", "--model", args.model, "--effort", args.effort,
@@ -239,7 +254,7 @@ def main(argv):
     if not rule_text:
         emit({"systemMessage": args.label + ": 규칙 원문(" + args.rules + ")을 읽지 못해 판정 없이 통과했습니다."})
         return 0
-    rules = (INSTRUCTIONS.replace("{scope}", SCOPES[args.scope])
+    rules = (INSTRUCTIONS.replace("{scope}", SCOPES[args.scope]).replace("{context}", str(CONTEXT))
              .replace("{label}", args.label).replace("{rules}", rule_text))
 
     verdict, error = judge(args, path, lines, rules)
