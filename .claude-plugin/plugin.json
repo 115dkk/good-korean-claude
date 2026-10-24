@@ -1,11 +1,17 @@
 {
   "name": "good-korean-claude",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Korean writing style 체계적 추론자 v4 and a PreToolUse hook that checks every Korean line an edit adds against the style's Korean rules.",
   "author": {
     "name": "115dkk",
     "url": "https://github.com/115dkk"
   },
   "license": "MIT",
-  "keywords": ["korean", "writing", "style", "translationese", "hooks"]
+  "keywords": [
+    "korean",
+    "writing",
+    "style",
+    "translationese",
+    "hooks"
+  ]
 }
