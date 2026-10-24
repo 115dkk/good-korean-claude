@@ -6,7 +6,8 @@ block_emdash.py(마크다운 파일 쓰기 검사)의 짝이다. 다음 중 하�
 - 단어 수 기준 영어 비율이 80% 이상이다. 한글이 섞인 단어는 한국어로 센다.
 
 코드블록, 인라인 코드, URL, 경로, 마크다운 링크, HTML 태그는 검사 전에 지운다.
-인용(>) 줄은 영어 비율 계산에서만 뺀다. 같은 턴에서 3번 막아도 고쳐지지 않으면 통과시킨다.
+인용(>) 줄은 em-dash를 찾을 때도, 영어 비율을 셀 때도 뺀다. 인용한 원문의 em-dash를
+고치게 하면 원문이 달라지기 때문이다. 같은 턴에서 3번 막아도 고쳐지지 않으면 통과시킨다.
 """
 
 import json
@@ -61,8 +62,8 @@ def prose(text):
 
 def judge(text):
     p = prose(text)
-    dashes = len(DASHES.findall(p))
     unquoted = "\n".join(l for l in p.split("\n") if not re.match(r"^\s{0,3}>", l))
+    dashes = len(DASHES.findall(unquoted))
     en = ko = 0
     for tok in unquoted.split():
         if HANGUL.search(tok):
