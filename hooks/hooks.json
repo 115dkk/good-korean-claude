@@ -1,5 +1,5 @@
 {
-  "description": "Three separate checks on Korean text: a translationese judge for every Korean line an edit adds, an em-dash ban for Korean Markdown files, and a check that the final reply has no em-dash and is not mostly English.",
+  "description": "Three separate checks on Korean text: a translationese judge for every Korean line an edit adds, an em-dash ban for Korean Markdown files, and a check that the final reply and every question Claude asks have no em-dash and are not mostly English.",
   "hooks": {
     "PreToolUse": [
       {
@@ -35,6 +35,20 @@
             ],
             "timeout": 15,
             "statusMessage": "em-dash check"
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/report_guard.py"
+            ],
+            "timeout": 15,
+            "statusMessage": "question check (em-dash, English ratio)"
           }
         ]
       }

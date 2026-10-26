@@ -1,13 +1,15 @@
-"""Stop hook: 사용자가 읽는 최종 답변(보고)을 검사한다.
+"""Stop hook과 PreToolUse(AskUserQuestion) hook: 사용자가 읽는 글을 검사한다.
 
-block_emdash.py(마크다운 파일 쓰기 검사)의 짝이다. 다음 중 하나라도 해당하면
-턴을 끝내지 못하게 막고 다시 쓰게 한다.
+block_emdash.py(마크다운 파일 쓰기 검사)의 짝이다. Stop에서는 최종 답변(보고)을,
+AskUserQuestion 직전에는 질문마다 제목, 본문, 선택지 이름과 설명을 모아 검사한다.
+다음 중 하나라도 해당하면 턴을 끝내지 못하게 막거나 질문을 보내지 못하게 막고 다시 쓰게 한다.
 - em-dash(U+2014) 또는 줄표(U+2015)가 있다. 하이픈(-)과 en-dash(U+2013)는 검사하지 않는다.
 - 단어 수 기준 영어 비율이 80% 이상이다. 한글이 섞인 단어는 한국어로 센다.
 
 코드블록, 인라인 코드, URL, 경로, 마크다운 링크, HTML 태그는 검사 전에 지운다.
 인용(>) 줄은 em-dash를 찾을 때도, 영어 비율을 셀 때도 뺀다. 인용한 원문의 em-dash를
 고치게 하면 원문이 달라지기 때문이다. 같은 턴에서 3번 막아도 고쳐지지 않으면 통과시킨다.
+질문은 연달아 3번 막은 뒤 다음 질문을 통과시킨다.
 """
 
 import json
@@ -18,6 +20,7 @@ import tempfile
 
 EN_RATIO_LIMIT = 0.8
 MAX_BLOCKS = 3
+ASK_SUFFIX = "-ask"  # 질문 검사는 답변 검사와 따로 센다
 
 DASHES = re.compile("[\u2014\u2015]")
 HANGUL = re.compile("[\uac00-\ud7a3\u3131-\u318e\u1100-\u11ff]")
@@ -82,24 +85,80 @@ def judge(text):
     }
 
 
-def reason_for(v):
-    lines = ["[보고 검사] 방금 최종 답변이 사용자에게 보이는 본문 검사에 걸렸습니다."]
+def problems(v):
+    out = []
     if v["dash_bad"]:
-        lines.append(
+        out.append(
             f"- em-dash(U+2014) 또는 줄표(U+2015)가 {v['dashes']}개 있습니다. "
             "쉼표, 마침표, 괄호, 콜론으로 바꾸거나 문장을 나누세요."
         )
     if v["english_bad"]:
-        lines.append(
+        out.append(
             f"- 영어 비율이 {round(v['ratio'] * 100)}%입니다(영어 단어 {v['en']}개, "
             f"한국어 단어 {v['ko']}개, 기준 {round(EN_RATIO_LIMIT * 100)}%). 본문을 한국어로 쓰세요."
         )
+    return out
+
+
+def reason_for(v):
+    lines = ["[보고 검사] 방금 최종 답변이 사용자에게 보이는 본문 검사에 걸렸습니다."]
+    lines += problems(v)
     lines.append(
         "코드블록, 인라인 코드, URL, 경로, 마크다운 링크, 인용(>) 줄은 검사에서 빠집니다. "
         "영어 원문을 꼭 보여야 하면 인용이나 코드블록에 넣으세요."
     )
     lines.append("고친 답변 전체를 다시 쓰세요. 사과나 이 검사에 대한 언급 없이 본문만 쓰세요.")
     return "\n".join(lines)
+
+
+def question_text(q):
+    """질문 하나에서 사용자에게 보이는 글. preview는 목업이나 코드라서 뺀다."""
+    parts = [q.get("header"), q.get("question")]
+    for opt in q.get("options") or []:
+        if isinstance(opt, dict):
+            parts += [opt.get("label"), opt.get("description")]
+    return "\n".join(str(p) for p in parts if p)
+
+
+def question_reason(bad):
+    lines = ["[질문 검사] 방금 만든 질문이 사용자에게 보이는 본문 검사에 걸려 질문을 보내지 않았습니다."]
+    for i, header, v in bad:
+        lines.append(f"질문 {i}({header}):" if header else f"질문 {i}:")
+        lines += problems(v)
+    lines.append(
+        "질문마다 제목, 본문, 선택지 이름과 설명을 모아 검사합니다. "
+        "인라인 코드, URL, 경로는 검사에서 빠집니다."
+    )
+    lines.append("질문을 고쳐 쓴 뒤 다시 물으세요. 사과나 이 검사에 대한 언급은 넣지 마세요.")
+    return "\n".join(lines)
+
+
+def check_questions(data, sid):
+    key = sid + ASK_SUFFIX
+    bad = []
+    for i, q in enumerate((data.get("tool_input") or {}).get("questions") or [], 1):
+        if not isinstance(q, dict):
+            continue
+        v = judge(question_text(q))
+        if v["dash_bad"] or v["english_bad"]:
+            bad.append((i, str(q.get("header") or ""), v))
+    if not bad:
+        counter(key, 0)
+        return 0
+    n = counter(key)
+    if n >= MAX_BLOCKS:
+        counter(key, 0)
+        emit({"systemMessage": f"질문 검사: {MAX_BLOCKS}번 다시 써도 기준을 넘지 못해 이번 질문은 보냈습니다."})
+        return 0
+    counter(key, n + 1)
+    emit({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": question_reason(bad),
+        }
+    })
+    return 0
 
 
 def last_text_from_transcript(path):
@@ -156,8 +215,11 @@ def main():
     if not isinstance(data, dict):
         return 0
     sid = str(data.get("session_id") or "")
+    if data.get("hook_event_name") == "PreToolUse":
+        return check_questions(data, sid) if data.get("tool_name") == "AskUserQuestion" else 0
     if not data.get("stop_hook_active"):
         counter(sid, 0)
+        counter(sid + ASK_SUFFIX, 0)
     text = data.get("last_assistant_message")
     if text is None:
         text = last_text_from_transcript(str(data.get("transcript_path") or ""))
