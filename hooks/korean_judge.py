@@ -9,6 +9,10 @@ Write/Edit/MultiEdit이 새로 들이는 줄 가운데 한글이 든 줄과 그 
 아무것도 출력하지 않아 도구 호출이 그대로 진행된다. 판정 모델 호출이 실패하면 막지 않고 통과시키되 그
 사실을 systemMessage로 알린다.
 
+편집 대상 파일이 든 git 저장소의 루트에 .hookignore가 있으면 .gitignore와 같은 문법으로 읽고,
+대상 파일이 거기 걸리면 모델을 부르지 않고 통과시킨다. 하위 디렉터리의 .hookignore는 읽지 않는다.
+?와 [...]는 git과 달리 UTF-8 바이트 하나가 아니라 글자 하나에 맞는다.
+
 인자
   --rules PATH       규칙 원문 파일. ~ 는 홈 디렉터리로 바꾼다.
   --section HEADING  그 파일에서 이 제목으로 시작하는 절만 쓴다(같거나 높은 단계의
@@ -40,6 +44,10 @@ JUDGE_TIMEOUT = 150
 MAX_CHARS = 20000
 CONTEXT = 3
 GUARD_ENV = "KOREAN_JUDGE_ACTIVE"
+HOOKIGNORE = ".hookignore"
+# git도 Windows와 macOS에서는 기본으로 대소문자를 가리지 않는다.
+IGNORECASE = sys.platform in ("win32", "darwin")
+NOTHING = r"(?!)"
 
 HANGUL = re.compile(r"[가-힣ㄱ-ㆎ]")
 HOME = os.path.expanduser("~")
@@ -48,6 +56,21 @@ TEST_DIRS = {"test", "tests", "__tests__", "__snapshots__", "testdata", "fixture
 TEST_NAME = re.compile(r"(^tests?\.rs$|_tests?\.[a-z]+$|\.(test|spec)\.[a-z]+$|^test_.*\.py$)", re.I)
 LOCKFILES = {"package-lock.json", "cargo.lock", "yarn.lock", "pnpm-lock.yaml", "poetry.lock"}
 AGENT_FILES = {"claude.md", "agents.md", "gemini.md", "skill.md"}
+
+POSIX_CLASSES = {
+    "alnum": "A-Za-z0-9",
+    "alpha": "A-Za-z",
+    "blank": "\\t ",
+    "cntrl": "\\x00-\\x1f\\x7f",
+    "digit": "0-9",
+    "graph": "\\x21-\\x7e",
+    "lower": "a-z",
+    "print": "\\x20-\\x7e",
+    "punct": "!-/:-@\\[-`{-~",
+    "space": "\\t-\\r ",
+    "upper": "A-Z",
+    "xdigit": "0-9A-Fa-f",
+}
 
 SCHEMA = {
     "type": "object",
@@ -133,6 +156,191 @@ def read_payload():
 def emit(obj):
     sys.stdout.buffer.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
     sys.stdout.buffer.write(b"\n")
+
+
+def repo_root(path):
+    """path가 든 git 저장소의 루트를 돌려준다. .git이 디렉터리든 파일이든 상관없고, 없으면 None이다."""
+    current = os.path.dirname(path)
+    while not os.path.exists(os.path.join(current, ".git")):
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+    return current
+
+
+def bracket_regex(pattern, index):
+    """pattern[index]부터 이어지는 [...]의 안쪽을 정규식으로 바꾸고, 닫는 ] 다음 위치와 함께 돌려준다.
+
+    git의 wildmatch.c와 같은 규칙을 따른다. 집합이 닫히지 않았거나 모르는 [:이름:]이 있으면
+    (None, 0)을 돌려준다.
+    """
+    negate = pattern[index:index + 1] in ("!", "^")
+    index += negate
+    members = []
+    previous = None
+    first = True
+    while index < len(pattern):
+        char = pattern[index]
+        index += 1
+        if char == "]" and not first:
+            body = "(?:" + "|".join(members) + ")"
+            return ("(?!/)(?!" + body + ")." if negate else "(?!/)" + body), index
+        first = False
+        if char == "\\":
+            if index == len(pattern):
+                return None, 0
+            char = pattern[index]
+            index += 1
+            members.append(re.escape(char))
+        elif char == "-" and previous is not None and index < len(pattern) and pattern[index] != "]":
+            last = pattern[index]
+            index += 1
+            if last == "\\":
+                if index == len(pattern):
+                    return None, 0
+                last = pattern[index]
+                index += 1
+            if previous <= last:
+                members.append("[" + re.escape(previous) + "-" + re.escape(last) + "]")
+            # 범위 바로 뒤의 -는 다시 범위를 만들지 않는다.
+            char = None
+        elif char == "[" and pattern[index:index + 1] == ":":
+            close = pattern.find("]", index + 1)
+            if close < 0:
+                return None, 0
+            if close > index + 1 and pattern[close - 1] == ":":
+                name = pattern[index + 1:close - 1]
+                if name not in POSIX_CLASSES:
+                    return None, 0
+                members.append("[" + POSIX_CLASSES[name] + "]")
+                index = close + 1
+                char = None
+            else:
+                members.append(re.escape(char))
+        else:
+            members.append(re.escape(char))
+        previous = char
+    return None, 0
+
+
+def wildmatch_regex(pattern):
+    """git wildmatch의 WM_PATHNAME 패턴을 정규식으로 바꾼다. 패턴이 깨졌으면 아무것에도 맞지 않는다."""
+    pieces = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        index += 1
+        if char == "\\":
+            if index == len(pattern):
+                return NOTHING
+            pieces.append(re.escape(pattern[index]))
+            index += 1
+        elif char == "?":
+            pieces.append("[^/]")
+        elif char == "[":
+            piece, index = bracket_regex(pattern, index)
+            if piece is None:
+                return NOTHING
+            pieces.append(piece)
+        elif char == "*":
+            start = index - 1
+            while index < len(pattern) and pattern[index] == "*":
+                index += 1
+            # **는 앞이 패턴 처음이나 /이고 뒤가 패턴 끝이나 /일 때만 디렉터리를 몇 단계든 넘는다.
+            if (index - start > 1 and (start == 0 or pattern[start - 1] == "/")
+                    and (index == len(pattern) or pattern[index] == "/")):
+                if index == len(pattern):
+                    pieces.append(".*")
+                else:
+                    pieces.append("(?:.*/)?")
+                    index += 1
+            else:
+                pieces.append("[^/]*")
+        else:
+            pieces.append(re.escape(char))
+    return "".join(pieces)
+
+
+def trim_trailing_spaces(line):
+    """git처럼 줄 끝의 공백을 지우되 \\ 뒤의 공백은 남긴다."""
+    cut = None
+    index = 0
+    while index < len(line):
+        if line[index] == " ":
+            cut = index if cut is None else cut
+        else:
+            if line[index] == "\\":
+                index += 1
+            cut = None
+        index += 1
+    return line if cut is None else line[:cut]
+
+
+def load_hookignore(root):
+    """root/.hookignore를 (정규식, 부정, 디렉터리 전용, 이름만 비교) 목록으로 읽는다."""
+    try:
+        with open(os.path.join(root, HOOKIGNORE), encoding="utf-8-sig", errors="replace", newline="") as handle:
+            text = handle.read()
+    except OSError:
+        return []
+    flags = re.DOTALL | (re.IGNORECASE if IGNORECASE else 0)
+    patterns = []
+    for line in text.split("\n"):
+        if not line or line.startswith("#"):
+            continue
+        line = trim_trailing_spaces(line[:-1] if line.endswith("\r") else line)
+        negate = line.startswith("!")
+        line = line[negate:]
+        dir_only = line.endswith("/")
+        line = line[:-1] if dir_only else line
+        if not line:
+            continue
+        basename_only = "/" not in line
+        if basename_only:
+            source = wildmatch_regex(line)
+        else:
+            line = line[1:] if line.startswith("/") else line
+            # git은 첫 와일드카드 앞까지를 글자 그대로 비교하고 나머지만 wildmatch에 넘긴다.
+            # 그래서 그 바로 뒤의 **는 패턴 처음에 있는 것으로 친다(b**/c가 bc에 맞는다).
+            literal = len(re.match(r"[^*?\[\\]*", line).group())
+            source = re.escape(line[:literal]) + wildmatch_regex(line[literal:])
+        patterns.append((re.compile(source, flags), negate, dir_only, basename_only))
+    return patterns
+
+
+def hookignore_match(relative, is_dir, patterns):
+    """저장소 루트 기준 경로 하나를 패턴 목록에 대 보고, 마지막으로 맞은 패턴에 따라 제외 여부를 정한다."""
+    excluded = False
+    name = relative.rsplit("/", 1)[-1]
+    for regex, negate, dir_only, basename_only in patterns:
+        if (is_dir or not dir_only) and regex.fullmatch(name if basename_only else relative):
+            excluded = not negate
+    return excluded
+
+
+def hookignored(path, cwd):
+    """path가 그 저장소 루트의 .hookignore에 걸리는지 돌려준다.
+
+    git과 같이 상위 디렉터리가 제외되면 그 안의 파일은 !로 다시 넣을 수 없다.
+    """
+    base = cwd if isinstance(cwd, str) and cwd else os.getcwd()
+    path = os.path.abspath(os.path.join(base, path))
+    root = repo_root(path)
+    if root is None:
+        return False
+    try:
+        relative = os.path.relpath(path, root).replace(os.sep, "/")
+    except ValueError:
+        return False
+    patterns = load_hookignore(root)
+    if not patterns or relative == ".." or relative.startswith("../"):
+        return False
+    parts = relative.split("/")
+    for end in range(1, len(parts)):
+        if hookignore_match("/".join(parts[:end]), True, patterns):
+            return True
+    return hookignore_match(relative, False, patterns)
 
 
 def skipped_path(path, scope):
@@ -253,7 +461,7 @@ def main(argv):
         return 0
     tool_input = payload.get("tool_input") or {}
     path = str(tool_input.get("file_path") or "")
-    if not path or skipped_path(path, args.scope):
+    if not path or skipped_path(path, args.scope) or hookignored(path, payload.get("cwd")):
         return 0
     lines = added_lines(payload["tool_name"], tool_input, path)
     if not lines:
