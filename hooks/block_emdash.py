@@ -41,10 +41,7 @@ def main():
     if not path.lower().endswith(MD_SUFFIXES):
         return 0
 
-    if tool == "Write":
-        new_text = str(tool_input.get("content") or "")
-    else:
-        new_text = str(tool_input.get("new_string") or "")
+    new_text = str(tool_input.get("content" if tool == "Write" else "new_string") or "")
 
     if EM_DASH not in new_text:
         return 0
