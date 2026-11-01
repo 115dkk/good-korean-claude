@@ -65,7 +65,7 @@ def prose(text):
 
 def judge(text):
     p = prose(text)
-    unquoted = "\n".join(l for l in p.split("\n") if not re.match(r"^\s{0,3}>", l))
+    unquoted = "\n".join(line for line in p.split("\n") if not re.match(r"^\s{0,3}>", line))
     dashes = len(DASHES.findall(unquoted))
     en = ko = 0
     for tok in unquoted.split():
@@ -125,10 +125,7 @@ def question_reason(bad):
     for i, header, v in bad:
         lines.append(f"질문 {i}({header}):" if header else f"질문 {i}:")
         lines += problems(v)
-    lines.append(
-        "질문마다 제목, 본문, 선택지 이름과 설명을 모아 검사합니다. "
-        "인라인 코드, URL, 경로는 검사에서 빠집니다."
-    )
+    lines.append("질문마다 제목, 본문, 선택지 이름과 설명을 모아 검사합니다. 인라인 코드, URL, 경로는 검사에서 빠집니다.")
     lines.append("질문을 고쳐 쓴 뒤 다시 물으세요. 사과나 이 검사에 대한 언급은 넣지 마세요.")
     return "\n".join(lines)
 
@@ -151,13 +148,15 @@ def check_questions(data, sid):
         emit({"systemMessage": f"질문 검사: {MAX_BLOCKS}번 다시 써도 기준을 넘지 못해 이번 질문은 보냈습니다."})
         return 0
     counter(key, n + 1)
-    emit({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": question_reason(bad),
+    emit(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": question_reason(bad),
+            }
         }
-    })
+    )
     return 0
 
 
@@ -176,9 +175,7 @@ def last_text_from_transcript(path):
         msg = row.get("message") or {}
         if row.get("type") == "user" and not row.get("isMeta"):
             content = msg.get("content")
-            if isinstance(content, str) or any(
-                isinstance(b, dict) and b.get("type") == "text" for b in (content or [])
-            ):
+            if isinstance(content, str) or any(isinstance(b, dict) and b.get("type") == "text" for b in (content or [])):
                 return ""
         if row.get("type") != "assistant":
             continue

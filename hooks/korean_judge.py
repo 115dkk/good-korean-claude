@@ -175,7 +175,7 @@ def bracket_regex(pattern, index):
     git의 wildmatch.c와 같은 규칙을 따른다. 집합이 닫히지 않았거나 모르는 [:이름:]이 있으면
     (None, 0)을 돌려준다.
     """
-    negate = pattern[index:index + 1] in ("!", "^")
+    negate = pattern[index : index + 1] in ("!", "^")
     index += negate
     members = []
     previous = None
@@ -205,12 +205,12 @@ def bracket_regex(pattern, index):
                 members.append("[" + re.escape(previous) + "-" + re.escape(last) + "]")
             # 범위 바로 뒤의 -는 다시 범위를 만들지 않는다.
             char = None
-        elif char == "[" and pattern[index:index + 1] == ":":
+        elif char == "[" and pattern[index : index + 1] == ":":
             close = pattern.find("]", index + 1)
             if close < 0:
                 return None, 0
             if close > index + 1 and pattern[close - 1] == ":":
-                name = pattern[index + 1:close - 1]
+                name = pattern[index + 1 : close - 1]
                 if name not in POSIX_CLASSES:
                     return None, 0
                 members.append("[" + POSIX_CLASSES[name] + "]")
@@ -248,8 +248,11 @@ def wildmatch_regex(pattern):
             while index < len(pattern) and pattern[index] == "*":
                 index += 1
             # **는 앞이 패턴 처음이나 /이고 뒤가 패턴 끝이나 /일 때만 디렉터리를 몇 단계든 넘는다.
-            if (index - start > 1 and (start == 0 or pattern[start - 1] == "/")
-                    and (index == len(pattern) or pattern[index] == "/")):
+            if (
+                index - start > 1
+                and (start == 0 or pattern[start - 1] == "/")
+                and (index == len(pattern) or pattern[index] == "/")
+            ):
                 if index == len(pattern):
                     pieces.append(".*")
                 else:
@@ -422,19 +425,44 @@ def judge(args, path, lines, rules):
     truncated = len(body) > MAX_CHARS
     body = body[:MAX_CHARS]
     # 규칙 원문은 Windows 명령줄 한도(32767자)를 넘을 수 있으므로 표준 입력으로 넘긴다.
-    prompt = (rules + "\n\n=== Text to judge ===\nFile: " + path + "\nAdded lines with Hangul and the added lines near them"
-              + (" (truncated)" if truncated else "") + ":\n" + body)
+    prompt = (
+        rules
+        + "\n\n=== Text to judge ===\nFile: "
+        + path
+        + "\nAdded lines with Hangul and the added lines near them"
+        + (" (truncated)" if truncated else "")
+        + ":\n"
+        + body
+    )
     command = [
-        claude, "-p", "--model", args.model, "--effort", args.effort,
-        "--tools", "", "--setting-sources", "local", "--strict-mcp-config",
-        "--no-session-persistence", "--output-format", "json",
-        "--json-schema", json.dumps(SCHEMA),
-        "--system-prompt", "You are a gate that judges Korean text against the rules given in the message. Answer only through the structured output.",
+        claude,
+        "-p",
+        "--model",
+        args.model,
+        "--effort",
+        args.effort,
+        "--tools",
+        "",
+        "--setting-sources",
+        "local",
+        "--strict-mcp-config",
+        "--no-session-persistence",
+        "--output-format",
+        "json",
+        "--json-schema",
+        json.dumps(SCHEMA),
+        "--system-prompt",
+        "You are a gate that judges Korean text against the rules given in the message. "
+        "Answer only through the structured output.",
     ]
     try:
         result = subprocess.run(
-            command, input=prompt.encode("utf-8"), capture_output=True, timeout=JUDGE_TIMEOUT,
-            cwd=tempfile.gettempdir(), env=dict(os.environ, **{GUARD_ENV: "1"}),
+            command,
+            input=prompt.encode("utf-8"),
+            capture_output=True,
+            timeout=JUDGE_TIMEOUT,
+            cwd=tempfile.gettempdir(),
+            env=dict(os.environ, **{GUARD_ENV: "1"}),
         )
     except subprocess.TimeoutExpired:
         return None, "판정이 " + str(JUDGE_TIMEOUT) + "초 안에 끝나지 않았습니다"
@@ -471,8 +499,12 @@ def main(argv):
     if not rule_text:
         emit({"systemMessage": args.label + ": 규칙 원문(" + args.rules + ")을 읽지 못해 판정 없이 통과했습니다."})
         return 0
-    rules = (INSTRUCTIONS.replace("{scope}", SCOPES[args.scope]).replace("{context}", str(CONTEXT))
-             .replace("{label}", args.label).replace("{rules}", rule_text))
+    rules = (
+        INSTRUCTIONS.replace("{scope}", SCOPES[args.scope])
+        .replace("{context}", str(CONTEXT))
+        .replace("{label}", args.label)
+        .replace("{rules}", rule_text)
+    )
 
     verdict, error = judge(args, path, lines, rules)
     if error:
@@ -483,25 +515,33 @@ def main(argv):
 
     added = "\n".join(lines)
     findings = [
-        item for item in verdict.get("findings") or []
-        if isinstance(item, dict) and str(item.get("quote") or "").strip()
-        and str(item.get("quote")).strip() in added
+        item
+        for item in verdict.get("findings") or []
+        if isinstance(item, dict) and str(item.get("quote") or "").strip() and str(item.get("quote")).strip() in added
     ]
     if not findings:
         return 0
 
     report = ["Deny: 이 규칙에 걸리는 표현입니다. (" + args.label + ", " + args.model + ", effort " + args.effort + ")"]
     for item in findings:
-        report.append("- '" + str(item["quote"]).strip() + "': " + str(item.get("rule") or "").strip()
-                      + " → " + str(item.get("fix") or "").strip())
+        report.append(
+            "- '"
+            + str(item["quote"]).strip()
+            + "': "
+            + str(item.get("rule") or "").strip()
+            + " → "
+            + str(item.get("fix") or "").strip()
+        )
     report.append("고쳐 쓴 뒤 다시 편집하십시오. 대상 파일: " + path)
-    emit({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": "\n".join(report),
+    emit(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "\n".join(report),
+            }
         }
-    })
+    )
     return 0
 
 
