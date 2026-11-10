@@ -184,11 +184,12 @@ def installed_root(own_root):
     plugin_dir = os.path.dirname(own_root)
     marketplace_dir = os.path.dirname(plugin_dir)
     cache_dir = os.path.dirname(marketplace_dir)
-    if os.path.basename(cache_dir) != "cache":
+    plugins_dir = os.path.dirname(cache_dir)
+    if os.path.basename(cache_dir) != "cache" or os.path.basename(plugins_dir) != "plugins":
         return None
     key = os.path.basename(plugin_dir) + "@" + os.path.basename(marketplace_dir)
     try:
-        with open(os.path.join(os.path.dirname(cache_dir), "installed_plugins.json"), encoding="utf-8-sig") as handle:
+        with open(os.path.join(plugins_dir, "installed_plugins.json"), encoding="utf-8-sig") as handle:
             entries = json.load(handle)["plugins"][key]
     except (OSError, ValueError, LookupError, TypeError):
         return None
@@ -198,46 +199,63 @@ def installed_root(own_root):
         return None
     installs = [entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("installPath"), str)]
     installs = [entry for entry in installs if entry["installPath"]]
-    if not installs or any(same_path(entry["installPath"], own_root) for entry in installs):
+    try:
+        if not installs or any(same_path(entry["installPath"], own_root) for entry in installs):
+            return None
+    except (OSError, ValueError):
+        # 경로에 NUL 같은 글자가 있으면 realpath가 ValueError를 낸다.
         return None
     installs.sort(key=lambda entry: entry.get("scope") != "user")
     return installs[0]["installPath"]
 
 
-def forward_to_installed(argv, raw):
-    """이 스크립트가 플러그인 캐시의 옛 판이면 설치 판의 같은 스크립트를 대신 실행하고 그 종료 코드를 돌려준다.
+def forward_command(argv):
+    """이 스크립트가 플러그인 캐시의 옛 판이면 설치 판의 같은 스크립트를 실행할 명령과 환경을 돌려준다.
 
-    표준 입력은 raw를 그대로 전달하고, 표준 출력과 표준 오류는 자식 프로세스와 함께 쓴다. 이 스크립트와 argv
-    가운데 이 판의 폴더 안을 가리키는 경로는 설치 판의 같은 경로로 바꾼다. 바꾼 경로가 설치 판에 없거나, 자식
-    프로세스를 띄우지 못하거나, 설치 판이 인자를 받지 않으면 None을 돌려주고, 그러면 이 판의 코드가 그대로 돈다.
+    이 스크립트와 argv 가운데 이 판의 폴더 안을 가리키는 경로는 설치 판의 같은 경로로 바꾼다. --이름=값 꼴이면
+    값만 본다. 넘기지 않을 때나 바꾼 경로가 설치 판에 없을 때는 (None, None)을 돌려준다.
     """
     if os.environ.get(FORWARD_ENV):
-        return None
+        return None, None
     script = os.path.abspath(__file__)
     own_root = os.path.dirname(os.path.dirname(script))
     target_root = installed_root(own_root)
     if not target_root:
-        return None
+        return None, None
     prefix = os.path.normcase(os.path.normpath(own_root)) + os.sep
     command = [sys.executable]
     for arg in [script, *argv]:
-        normalized = os.path.normpath(arg)
+        name, equals, value = arg.partition("=") if arg.startswith("--") else ("", "", arg)
+        normalized = os.path.normpath(value)
         if os.path.normcase(normalized).startswith(prefix):
-            arg = os.path.join(target_root, normalized[len(prefix) :])
-            if not os.path.exists(arg):
-                return None
-        command.append(arg)
-    env = dict(os.environ, CLAUDE_PLUGIN_ROOT=target_root, **{FORWARD_ENV: "1"})
+            value = os.path.join(target_root, normalized[len(prefix) :])
+            if not os.path.exists(value):
+                return None, None
+        command.append(name + equals + value)
+    return command, dict(os.environ, CLAUDE_PLUGIN_ROOT=target_root, **{FORWARD_ENV: "1"})
+
+
+def forward_to_installed(argv):
+    """이 스크립트가 플러그인 캐시의 옛 판이면 설치 판의 같은 스크립트를 대신 실행한다.
+
+    (종료 코드, 읽은 표준 입력)을 돌려준다. 표준 입력은 넘길 때만 읽어 자식 프로세스에 그대로 전달하고, 표준
+    출력과 표준 오류는 자식 프로세스와 함께 쓴다. 종료 코드가 None이면 이 판의 코드가 그대로 돌아야 한다. 넘기지
+    않을 때, 자식 프로세스를 띄우지 못할 때, 설치 판이 인자를 받지 않을 때가 그렇다.
+    """
+    command, env = forward_command(argv)
+    if not command:
+        return None, None
+    raw = read_stdin()
     try:
         code = subprocess.run(command, input=raw, env=env).returncode
-    except OSError:
-        return None
+    except (OSError, ValueError):
+        return None, raw
     # 이 스크립트가 2로 끝나는 것은 argparse가 인자를 받지 않았을 때뿐인데, Claude Code는 종료 코드 2를 받으면
     # 편집을 막는다. 설치 판이 옛 판의 hooks.json이 주는 인자를 받지 않는 것이니 이 판의 코드로 돌아온다.
     if code == 2:
-        return None
+        return None, raw
     # 신호로 끝난 자식은 음수 종료 코드를 돌려주므로 1로 바꾼다.
-    return code if code >= 0 else 1
+    return (code if code >= 0 else 1), raw
 
 
 def repo_root(path):
@@ -565,12 +583,11 @@ def judge(args, path, lines, rules):
 def main(argv):
     if os.environ.get(GUARD_ENV):
         return 0
-    raw = read_stdin()
-    forwarded = forward_to_installed(argv, raw)
+    forwarded, raw = forward_to_installed(argv)
     if forwarded is not None:
         return forwarded
     args = parse_args(argv)
-    payload = read_payload(raw)
+    payload = read_payload(read_stdin() if raw is None else raw)
     if not isinstance(payload, dict) or payload.get("tool_name") not in ("Write", "Edit", "MultiEdit"):
         return 0
     tool_input = payload.get("tool_input") or {}
