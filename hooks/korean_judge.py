@@ -13,6 +13,11 @@ Write/Edit/MultiEdit이 새로 들이는 줄 가운데 한글이 든 줄과 그 
 대상 파일이 거기 걸리면 모델을 부르지 않고 통과시킨다. 하위 디렉터리의 .hookignore는 읽지 않는다.
 ?와 [...]는 git과 달리 UTF-8 바이트 하나가 아니라 글자 하나에 맞는다.
 
+Claude Code 프로세스는 뜰 때 정한 플러그인 폴더의 훅을 끝날 때까지 쓴다. 그래서 플러그인을 올린 뒤에도
+오래 떠 있는 세션은 옛 판의 이 스크립트를 부른다. 플러그인 캐시(plugins/cache/<마켓플레이스>/<플러그인>/<판>)에
+있는 이 스크립트가 installed_plugins.json에 적힌 설치 판이 아니면, 설치 판의 같은 스크립트를 대신 실행하고
+그 종료 코드를 그대로 돌려준다. 인자 가운데 이 판의 폴더 안을 가리키는 경로는 설치 판의 같은 경로로 바꾼다.
+
 인자
   --rules PATH       규칙 원문 파일. ~ 는 홈 디렉터리로 바꾼다.
   --section HEADING  그 파일에서 이 제목으로 시작하는 절만 쓴다(같거나 높은 단계의
@@ -44,6 +49,7 @@ JUDGE_TIMEOUT = 150
 MAX_CHARS = 20000
 CONTEXT = 3
 GUARD_ENV = "KOREAN_JUDGE_ACTIVE"
+FORWARD_ENV = "KOREAN_JUDGE_FORWARDED"
 HOOKIGNORE = ".hookignore"
 # git도 Windows와 macOS에서는 기본으로 대소문자를 가리지 않는다.
 IGNORECASE = sys.platform in ("win32", "darwin")
@@ -145,9 +151,15 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
-def read_payload():
+def read_stdin():
     try:
-        raw = sys.stdin.buffer.read()
+        return sys.stdin.buffer.read()
+    except Exception:
+        return b""
+
+
+def read_payload(raw):
+    try:
         return json.loads(raw.decode("utf-8", errors="replace")) if raw else None
     except Exception:
         return None
@@ -156,6 +168,76 @@ def read_payload():
 def emit(obj):
     sys.stdout.buffer.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
     sys.stdout.buffer.write(b"\n")
+
+
+def same_path(first, second):
+    return os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second))
+
+
+def installed_root(own_root):
+    """own_root가 플러그인 캐시에 남은 옛 판이면 installed_plugins.json에 적힌 설치 판의 루트를 돌려준다.
+
+    캐시는 plugins/cache/<마켓플레이스>/<플러그인>/<판> 꼴이고, 목록에서는 <플러그인>@<마켓플레이스>로 찾는다.
+    own_root가 설치 판 가운데 하나이거나, 캐시 밖에 있거나(로컬 훅), 목록을 읽지 못하면 None을 돌려준다.
+    범위(scope)마다 설치 판이 따로 있으면 user 범위의 판을 고른다.
+    """
+    plugin_dir = os.path.dirname(own_root)
+    marketplace_dir = os.path.dirname(plugin_dir)
+    cache_dir = os.path.dirname(marketplace_dir)
+    if os.path.basename(cache_dir) != "cache":
+        return None
+    key = os.path.basename(plugin_dir) + "@" + os.path.basename(marketplace_dir)
+    try:
+        with open(os.path.join(os.path.dirname(cache_dir), "installed_plugins.json"), encoding="utf-8-sig") as handle:
+            entries = json.load(handle)["plugins"][key]
+    except (OSError, ValueError, LookupError, TypeError):
+        return None
+    # 항목이 목록이 아니라 객체 하나면 그 하나만 본다.
+    entries = [entries] if isinstance(entries, dict) else entries
+    if not isinstance(entries, list):
+        return None
+    installs = [entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("installPath"), str)]
+    installs = [entry for entry in installs if entry["installPath"]]
+    if not installs or any(same_path(entry["installPath"], own_root) for entry in installs):
+        return None
+    installs.sort(key=lambda entry: entry.get("scope") != "user")
+    return installs[0]["installPath"]
+
+
+def forward_to_installed(argv, raw):
+    """이 스크립트가 플러그인 캐시의 옛 판이면 설치 판의 같은 스크립트를 대신 실행하고 그 종료 코드를 돌려준다.
+
+    표준 입력은 raw를 그대로 전달하고, 표준 출력과 표준 오류는 자식 프로세스와 함께 쓴다. 이 스크립트와 argv
+    가운데 이 판의 폴더 안을 가리키는 경로는 설치 판의 같은 경로로 바꾼다. 바꾼 경로가 설치 판에 없거나, 자식
+    프로세스를 띄우지 못하거나, 설치 판이 인자를 받지 않으면 None을 돌려주고, 그러면 이 판의 코드가 그대로 돈다.
+    """
+    if os.environ.get(FORWARD_ENV):
+        return None
+    script = os.path.abspath(__file__)
+    own_root = os.path.dirname(os.path.dirname(script))
+    target_root = installed_root(own_root)
+    if not target_root:
+        return None
+    prefix = os.path.normcase(os.path.normpath(own_root)) + os.sep
+    command = [sys.executable]
+    for arg in [script, *argv]:
+        normalized = os.path.normpath(arg)
+        if os.path.normcase(normalized).startswith(prefix):
+            arg = os.path.join(target_root, normalized[len(prefix) :])
+            if not os.path.exists(arg):
+                return None
+        command.append(arg)
+    env = dict(os.environ, CLAUDE_PLUGIN_ROOT=target_root, **{FORWARD_ENV: "1"})
+    try:
+        code = subprocess.run(command, input=raw, env=env).returncode
+    except OSError:
+        return None
+    # 이 스크립트가 2로 끝나는 것은 argparse가 인자를 받지 않았을 때뿐인데, Claude Code는 종료 코드 2를 받으면
+    # 편집을 막는다. 설치 판이 옛 판의 hooks.json이 주는 인자를 받지 않는 것이니 이 판의 코드로 돌아온다.
+    if code == 2:
+        return None
+    # 신호로 끝난 자식은 음수 종료 코드를 돌려주므로 1로 바꾼다.
+    return code if code >= 0 else 1
 
 
 def repo_root(path):
@@ -483,8 +565,12 @@ def judge(args, path, lines, rules):
 def main(argv):
     if os.environ.get(GUARD_ENV):
         return 0
+    raw = read_stdin()
+    forwarded = forward_to_installed(argv, raw)
+    if forwarded is not None:
+        return forwarded
     args = parse_args(argv)
-    payload = read_payload()
+    payload = read_payload(raw)
     if not isinstance(payload, dict) or payload.get("tool_name") not in ("Write", "Edit", "MultiEdit"):
         return 0
     tool_input = payload.get("tool_input") or {}
